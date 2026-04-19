@@ -1,0 +1,32 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Build ID Card Print
+      run: |
+        mkdir build
+        cd build
+        rc /fo app.res ../src/app.rc
+        cl /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE ../src/main_win.cpp app.res /Fe:IDCardPrint.exe /link user32.lib gdi32.lib comdlg32.lib comctl32.lib gdiplus.lib ole32.lib shell32.lib /SUBSYSTEM:WINDOWS
+      shell: cmd
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: build/IDCardPrint.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
