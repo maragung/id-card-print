@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.10)
+project(IDCardPrinter)
+
+set(CMAKE_CXX_STANDARD 11)
+
+if(WIN32)
+    add_executable(IDCardPrinter WIN32 src/main_win.cpp src/export.h)
+    target_link_libraries(IDCardPrinter user32 gdi32 comdlg32 comctl32 gdiplus)
+elseif(UNIX AND NOT APPLE)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+    add_executable(IDCardPrinter src/main_linux.cpp src/export.h)
+    target_include_directories(IDCardPrinter PRIVATE ${GTK3_INCLUDE_DIRS})
+    target_link_libraries(IDCardPrinter PRIVATE ${GTK3_LIBRARIES})
+endif()
