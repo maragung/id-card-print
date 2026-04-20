@@ -6,6 +6,7 @@
 #include <gdiplus.h>
 #include <shellapi.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -20,6 +21,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 using namespace Gdiplus;
 
@@ -32,6 +34,7 @@ using namespace Gdiplus;
 #define ID_BTN_PRINT    106
 #define ID_CBO_EDGE     109
 #define ID_CBO_ORIENT   110
+#define ID_CHK_DEF_SIZE 111
 
 #define ID_BTN_PREV_PG1 301
 #define ID_BTN_PREV_PG2 302
@@ -50,6 +53,8 @@ using namespace Gdiplus;
 #define ID_TXT_MR       504
 #define ID_TXT_MT       505
 #define ID_TXT_MB       506
+#define ID_TXT_CARDW    507
+#define ID_TXT_CARDH    508
 
 // Editor Dialog IDs
 #define ID_ED_OK      401
@@ -106,20 +111,24 @@ struct ThemeColors {
     COLORREF bg;
     COLORREF text;
     COLORREF controlBg;
+    COLORREF controlText;
     COLORREF border;
     HBRUSH hBrushBg;
     HBRUSH hBrushControl;
 };
 
 ThemeColors g_themes[] = {
-    { RGB(249, 249, 249), RGB(30, 30, 30), RGB(255, 255, 255), RGB(210, 210, 210), NULL, NULL },     // Light
-    { RGB(25, 25, 25), RGB(240, 240, 240), RGB(40, 40, 40), RGB(60, 60, 60), NULL, NULL },           // Dark
-    { RGB(235, 245, 255), RGB(0, 60, 120), RGB(250, 253, 255), RGB(180, 210, 240), NULL, NULL }    // Azure
+    // Light
+    { RGB(249, 249, 249), RGB(32, 32, 32), RGB(255, 255, 255), RGB(0, 0, 0), RGB(210, 210, 210), NULL, NULL },
+    // Dark (Win11-style Dark Gray)
+    { RGB(32, 32, 32), RGB(240, 240, 240), RGB(45, 45, 45), RGB(255, 255, 255), RGB(60, 60, 60), NULL, NULL },
+    // Azure
+    { RGB(235, 245, 255), RGB(0, 60, 120), RGB(250, 253, 255), RGB(0, 40, 80), RGB(180, 210, 240), NULL, NULL }
 };
 int g_currentTheme = 0;
 
 HWND hFrontLabel, hBackLabel, hPaperCombo, hCopiesEdit, hDuplexCheck, hEdgeCombo, hOrientCombo;
-HWND hML, hMR, hMT, hMB;
+HWND hML, hMR, hMT, hMB, hCardW, hCardH, hDefSizeCheck;
 HWND hPreviewArea, hBtnPage1, hBtnPage2, hGroupSettings;
 
 PrintSettings g_settings;
@@ -128,6 +137,7 @@ ImageTransform g_frontXform, g_backXform;
 Image* g_imgFront = nullptr;
 Image* g_imgBack = nullptr;
 int g_previewPage = 0;
+bool g_useDefaultSize = true;
 
 void ApplyTheme(HWND hwnd) {
     ThemeColors& t = g_themes[g_currentTheme];
@@ -136,12 +146,25 @@ void ApplyTheme(HWND hwnd) {
     t.hBrushBg = CreateSolidBrush(t.bg);
     t.hBrushControl = CreateSolidBrush(t.controlBg);
 
-    // Dark Mode title bar support (Windows 10 17763+)
+    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)t.hBrushBg);
+    
+    // Windows Dark Mode API
     BOOL dark = (g_currentTheme == 1);
     DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE
 
+    EnumChildWindows(hwnd, [](HWND c, LPARAM p){ 
+        ThemeColors& t = g_themes[g_currentTheme];
+        // Apply Explorer theme to some controls to help with dark mode
+        if (g_currentTheme == 1) SetWindowTheme(c, L"DarkMode_Explorer", NULL);
+        else SetWindowTheme(c, L"Explorer", NULL);
+        
+        InvalidateRect(c, NULL, TRUE); 
+        UpdateWindow(c);
+        return TRUE; 
+    }, 0);
+    
     InvalidateRect(hwnd, NULL, TRUE);
-    EnumChildWindows(hwnd, [](HWND c, LPARAM p){ InvalidateRect(c, NULL, TRUE); return TRUE; }, 0);
+    UpdateWindow(hwnd);
 }
 
 void UpdateUIFromSettings() {
@@ -159,6 +182,13 @@ void UpdateUIFromSettings() {
     swprintf(buf, 32, L"%.1f", g_settings.marginTop); if (hMT) SetWindowTextW(hMT, buf);
     swprintf(buf, 32, L"%.1f", g_settings.marginBottom); if (hMB) SetWindowTextW(hMB, buf);
     swprintf(buf, 32, L"%d", g_settings.copies); if (hCopiesEdit) SetWindowTextW(hCopiesEdit, buf);
+    
+    if (hDefSizeCheck) SendMessage(hDefSizeCheck, BM_SETCHECK, g_useDefaultSize ? BST_CHECKED : BST_UNCHECKED, 0);
+    swprintf(buf, 32, L"%.2f", g_settings.cardWidthMm); if (hCardW) SetWindowTextW(hCardW, buf);
+    swprintf(buf, 32, L"%.2f", g_settings.cardHeightMm); if (hCardH) SetWindowTextW(hCardH, buf);
+    if (hCardW) EnableWindow(hCardW, !g_useDefaultSize);
+    if (hCardH) EnableWindow(hCardH, !g_useDefaultSize);
+
     if (hFrontLabel) SetWindowTextW(hFrontLabel, g_frontPathW.empty() ? L"No Image Selected" : g_frontPathW.c_str());
     if (hBackLabel) SetWindowTextW(hBackLabel, g_backPathW.empty() ? L"No Image Selected" : g_backPathW.c_str());
 }
@@ -177,7 +207,15 @@ void ReadSettingsFromUI() {
     if (hMR) { GetWindowTextW(hMR, buf, 32); g_settings.marginRight = (float)_wtof(buf); }
     if (hMT) { GetWindowTextW(hMT, buf, 32); g_settings.marginTop = (float)_wtof(buf); }
     if (hMB) { GetWindowTextW(hMB, buf, 32); g_settings.marginBottom = (float)_wtof(buf); }
-    g_settings.cardWidthMm = 85.6f; g_settings.cardHeightMm = 54.0f;
+    
+    if (hDefSizeCheck) g_useDefaultSize = (SendMessage(hDefSizeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    if (g_useDefaultSize) {
+        g_settings.cardWidthMm = 85.6f;
+        g_settings.cardHeightMm = 53.98f;
+    } else {
+        if (hCardW) { GetWindowTextW(hCardW, buf, 32); g_settings.cardWidthMm = (float)_wtof(buf); }
+        if (hCardH) { GetWindowTextW(hCardH, buf, 32); g_settings.cardHeightMm = (float)_wtof(buf); }
+    }
 }
 
 void SaveAppSettings() {
@@ -186,7 +224,7 @@ void SaveAppSettings() {
     if (f.is_open()) {
         f << g_settings.paperWidthMm << L"\n" << g_settings.paperHeightMm << L"\n" << g_settings.marginLeft << L"\n" << g_settings.marginRight << L"\n";
         f << g_settings.marginTop << L"\n" << g_settings.marginBottom << L"\n" << (g_settings.isLandscape ? 1 : 0) << L"\n" << (g_settings.duplex ? 1 : 0) << L"\n" << g_settings.flipEdge << L"\n";
-        f << g_currentTheme << L"\n";
+        f << g_currentTheme << L"\n" << (g_useDefaultSize ? 1 : 0) << L"\n" << g_settings.cardWidthMm << L"\n" << g_settings.cardHeightMm << L"\n";
         f.close();
     }
 }
@@ -194,14 +232,14 @@ void SaveAppSettings() {
 void LoadAppSettings() {
     std::wifstream f(L"settings.ini");
     if (f.is_open()) {
-        int iLand, iDup;
-        f >> g_settings.paperWidthMm >> g_settings.paperHeightMm >> g_settings.marginLeft >> g_settings.marginRight >> g_settings.marginTop >> g_settings.marginBottom >> iLand >> iDup >> g_settings.flipEdge >> g_currentTheme;
-        g_settings.isLandscape = (iLand != 0); g_settings.duplex = (iDup != 0);
+        int iLand, iDup, iDef;
+        f >> g_settings.paperWidthMm >> g_settings.paperHeightMm >> g_settings.marginLeft >> g_settings.marginRight >> g_settings.marginTop >> g_settings.marginBottom >> iLand >> iDup >> g_settings.flipEdge >> g_currentTheme >> iDef >> g_settings.cardWidthMm >> g_settings.cardHeightMm;
+        g_settings.isLandscape = (iLand != 0); g_settings.duplex = (iDup != 0); g_useDefaultSize = (iDef != 0);
         f.close();
     } else {
-        g_settings.paperWidthMm = 210.0f; g_settings.paperHeightMm = 297.0f; g_settings.cardWidthMm = 85.6f; g_settings.cardHeightMm = 54.0f;
+        g_settings.paperWidthMm = 210.0f; g_settings.paperHeightMm = 297.0f; g_settings.cardWidthMm = 85.6f; g_settings.cardHeightMm = 53.98f;
         g_settings.marginLeft = 10.0f; g_settings.marginRight = 10.0f; g_settings.marginTop = 10.0f; g_settings.marginBottom = 10.0f;
-        g_settings.copies = 1; g_settings.isLandscape = false; g_settings.duplex = true; g_settings.flipEdge = 0; g_currentTheme = 0;
+        g_settings.copies = 1; g_settings.isLandscape = false; g_settings.duplex = true; g_settings.flipEdge = 0; g_currentTheme = 0; g_useDefaultSize = true;
     }
 }
 
@@ -213,7 +251,7 @@ void ExportWorkspace(HWND hwnd) {
         if (f.is_open()) {
             f << g_frontPathW << L"|" << g_frontXform.rotate << L"|" << g_frontXform.scale << L"|" << g_frontXform.panX << L"|" << g_frontXform.panY << L"\n";
             f << g_backPathW << L"|" << g_backXform.rotate << L"|" << g_backXform.scale << L"|" << g_backXform.panX << L"|" << g_backXform.panY << L"\n";
-            f << g_settings.paperWidthMm << L"|" << g_settings.paperHeightMm << L"|" << g_settings.marginLeft << L"|" << g_settings.marginRight << L"|" << g_settings.marginTop << L"|" << g_settings.marginBottom << L"|" << (g_settings.isLandscape ? 1 : 0) << L"|" << (g_settings.duplex ? 1 : 0) << L"|" << g_settings.flipEdge << L"\n";
+            f << g_settings.paperWidthMm << L"|" << g_settings.paperHeightMm << L"|" << g_settings.marginLeft << L"|" << g_settings.marginRight << L"|" << g_settings.marginTop << L"|" << g_settings.marginBottom << L"|" << (g_settings.isLandscape ? 1 : 0) << L"|" << (g_settings.duplex ? 1 : 0) << L"|" << g_settings.flipEdge << L"|" << g_settings.cardWidthMm << L"|" << g_settings.cardHeightMm << L"\n";
             f.close();
         }
     }
@@ -235,7 +273,7 @@ void ImportWorkspace(HWND hwnd) {
             std::getline(f, line); parse(line, g_frontPathW, g_frontXform);
             std::getline(f, line); parse(line, g_backPathW, g_backXform);
             int iLand, iDup;
-            f >> g_settings.paperWidthMm; f.ignore(1); f >> g_settings.paperHeightMm; f.ignore(1); f >> g_settings.marginLeft; f.ignore(1); f >> g_settings.marginRight; f.ignore(1); f >> g_settings.marginTop; f.ignore(1); f >> g_settings.marginBottom; f.ignore(1); f >> iLand; f.ignore(1); f >> iDup; f.ignore(1); f >> g_settings.flipEdge;
+            f >> g_settings.paperWidthMm; f.ignore(1); f >> g_settings.paperHeightMm; f.ignore(1); f >> g_settings.marginLeft; f.ignore(1); f >> g_settings.marginRight; f.ignore(1); f >> g_settings.marginTop; f.ignore(1); f >> g_settings.marginBottom; f.ignore(1); f >> iLand; f.ignore(1); f >> iDup; f.ignore(1); f >> g_settings.flipEdge; f.ignore(1); f >> g_settings.cardWidthMm; f.ignore(1); f >> g_settings.cardHeightMm;
             g_settings.isLandscape = (iLand != 0); g_settings.duplex = (iDup != 0);
             f.close();
             if (g_imgFront) delete g_imgFront; g_imgFront = g_frontPathW.empty() ? nullptr : new Image(g_frontPathW.c_str());
@@ -347,7 +385,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         auto positions = CalculateLayout(g_settings);
         for (const auto& pos : positions) {
             if (pos.page != g_previewPage) continue;
-            DrawIDCard(g, pos.isFront ? g_imgFront : g_imgBack, pos.isFront ? g_frontXform : g_backXform, offX + pos.x_mm * scale, offY + pos.y_mm * scale, g_settings.cardWidthMm * scale, g_settings.cardHeightMm * scale, g_settings.cardWidthMm);
+            DrawIDCard(g, pos.isFront ? g_imgFront : g_imgBack, pos.isFront ? g_frontXform : g_frontXform, offX + pos.x_mm * scale, offY + pos.y_mm * scale, g_settings.cardWidthMm * scale, g_settings.cardHeightMm * scale, g_settings.cardWidthMm);
         }
         Graphics screen(hdc); screen.DrawImage(&bmp, 0, 0); EndPaint(hwnd, &ps); return 0;
     }
@@ -370,7 +408,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SetMenu(hwnd, hMenuBar);
         
         int y = 20, x = 20;
-        hGroupSettings = CreateWindowW(L"BUTTON", L"PRINT SETTINGS", WS_VISIBLE | WS_CHILD | BS_GROUPBOX, 10, 5, 200, 780, hwnd, NULL, NULL, NULL);
+        hGroupSettings = CreateWindowW(L"BUTTON", L"PRINT SETTINGS", WS_VISIBLE | WS_CHILD | BS_GROUPBOX, 10, 5, 200, 800, hwnd, NULL, NULL, NULL);
         CreateWindowW(L"BUTTON", L"FRONT SIDE", WS_VISIBLE | WS_CHILD | BS_GROUPBOX, x, y, 180, 80, hwnd, NULL, NULL, NULL);
         CreateWindowW(L"BUTTON", L"SELECT IMAGE", WS_VISIBLE | WS_CHILD, x+5, y+20, 170, 30, hwnd, (HMENU)ID_BTN_FRONT, NULL, NULL);
         hFrontLabel = CreateWindowW(L"STATIC", L"No Image", WS_VISIBLE | WS_CHILD | SS_LEFTNOWORDWRAP, x+5, y+55, 170, 20, hwnd, NULL, NULL, NULL);
@@ -379,6 +417,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         CreateWindowW(L"BUTTON", L"SELECT IMAGE", WS_VISIBLE | WS_CHILD, x+5, y+20, 170, 30, hwnd, (HMENU)ID_BTN_BACK, NULL, NULL);
         hBackLabel = CreateWindowW(L"STATIC", L"No Image", WS_VISIBLE | WS_CHILD | SS_LEFTNOWORDWRAP, x+5, y+55, 170, 20, hwnd, NULL, NULL, NULL);
         y += 100;
+        
+        CreateWindowW(L"STATIC", L"ID Card Size (mm):", WS_VISIBLE | WS_CHILD, x, y, 180, 20, hwnd, NULL, NULL, NULL);
+        hDefSizeCheck = CreateWindowW(L"BUTTON", L"Use default size", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX, x, y+20, 180, 20, hwnd, (HMENU)ID_CHK_DEF_SIZE, NULL, NULL);
+        CreateWindowW(L"STATIC", L"W:", WS_VISIBLE | WS_CHILD, x, y+45, 20, 20, hwnd, NULL, NULL, NULL);
+        hCardW = CreateWindowW(L"EDIT", L"85.60", WS_VISIBLE | WS_CHILD | WS_BORDER, x+25, y+45, 55, 22, hwnd, (HMENU)ID_TXT_CARDW, NULL, NULL);
+        CreateWindowW(L"STATIC", L"H:", WS_VISIBLE | WS_CHILD, x+90, y+45, 20, 20, hwnd, NULL, NULL, NULL);
+        hCardH = CreateWindowW(L"EDIT", L"53.98", WS_VISIBLE | WS_CHILD | WS_BORDER, x+115, y+45, 55, 22, hwnd, (HMENU)ID_TXT_CARDH, NULL, NULL);
+        y += 80;
+
         CreateWindowW(L"STATIC", L"Orientation:", WS_VISIBLE | WS_CHILD, x, y, 180, 20, hwnd, NULL, NULL, NULL);
         hOrientCombo = CreateWindowW(L"COMBOBOX", L"", WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST, x, y+20, 180, 100, hwnd, (HMENU)ID_CBO_ORIENT, NULL, NULL);
         SendMessageW(hOrientCombo, CB_ADDSTRING, 0, (LPARAM)L"Portrait"); SendMessageW(hOrientCombo, CB_ADDSTRING, 0, (LPARAM)L"Landscape");
@@ -427,7 +474,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     }
     case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLORBTN:
     case WM_CTLCOLORDLG: {
         HDC hdc = (HDC)wParam;
         ThemeColors& t = g_themes[g_currentTheme];
@@ -438,28 +484,41 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
         ThemeColors& t = g_themes[g_currentTheme];
-        SetTextColor(hdc, t.text);
+        SetTextColor(hdc, t.controlText);
         SetBkColor(hdc, t.controlBg);
         return (LRESULT)t.hBrushControl;
     }
     case WM_CTLCOLORLISTBOX: {
         HDC hdc = (HDC)wParam;
         ThemeColors& t = g_themes[g_currentTheme];
-        SetTextColor(hdc, t.text);
+        SetTextColor(hdc, t.controlText);
         SetBkColor(hdc, t.controlBg);
         return (LRESULT)t.hBrushControl;
     }
+    case WM_CTLCOLORBTN: {
+        HDC hdc = (HDC)wParam;
+        ThemeColors& t = g_themes[g_currentTheme];
+        SetTextColor(hdc, t.text);
+        SetBkColor(hdc, t.bg);
+        return (LRESULT)t.hBrushBg;
+    }
     case WM_DROPFILES: { HDROP hDrop = (HDROP)wParam; wchar_t file[MAX_PATH]; DragQueryFileW(hDrop, 0, file, MAX_PATH); HandleFileSelection(hwnd, 1, file); DragFinish(hDrop); break; }
-    case WM_COMMAND:
-        if (LOWORD(wParam) == ID_BTN_FRONT) HandleFileSelection(hwnd, 1, L"");
-        if (LOWORD(wParam) == ID_BTN_BACK) HandleFileSelection(hwnd, 2, L"");
-        if (LOWORD(wParam) == ID_MENU_IMPORT) ImportWorkspace(hwnd);
-        if (LOWORD(wParam) == ID_MENU_EXPORT) ExportWorkspace(hwnd);
-        if (LOWORD(wParam) == ID_MENU_THEME_LIGHT) { g_currentTheme = 0; SaveAppSettings(); ApplyTheme(hwnd); }
-        if (LOWORD(wParam) == ID_MENU_THEME_DARK)  { g_currentTheme = 1; SaveAppSettings(); ApplyTheme(hwnd); }
-        if (LOWORD(wParam) == ID_MENU_THEME_AZURE) { g_currentTheme = 2; SaveAppSettings(); ApplyTheme(hwnd); }
-        if (LOWORD(wParam) == ID_MENU_ABOUT) MessageBoxW(hwnd, L"ID Card Print\nCreated by Maragung", L"About", MB_OK | MB_ICONINFORMATION);
-        if (LOWORD(wParam) == ID_BTN_PRINT) {
+    case WM_COMMAND: {
+        WORD id = LOWORD(wParam);
+        WORD code = HIWORD(wParam);
+        
+        if (id == ID_BTN_FRONT) HandleFileSelection(hwnd, 1, L"");
+        else if (id == ID_BTN_BACK) HandleFileSelection(hwnd, 2, L"");
+        else if (id == ID_MENU_IMPORT) ImportWorkspace(hwnd);
+        else if (id == ID_MENU_EXPORT) ExportWorkspace(hwnd);
+        else if (id == ID_MENU_THEME_LIGHT) { g_currentTheme = 0; SaveAppSettings(); ApplyTheme(hwnd); }
+        else if (id == ID_MENU_THEME_DARK)  { g_currentTheme = 1; SaveAppSettings(); ApplyTheme(hwnd); }
+        else if (id == ID_MENU_THEME_AZURE) { g_currentTheme = 2; SaveAppSettings(); ApplyTheme(hwnd); }
+        else if (id == ID_CHK_DEF_SIZE || id == ID_CHK_DUPLEX) {
+            ReadSettingsFromUI(); UpdateUIFromSettings(); InvalidateRect(hPreviewArea, NULL, TRUE); SaveAppSettings();
+        }
+        else if (id == ID_MENU_ABOUT) MessageBoxW(hwnd, L"ID Card Print\nCreated by Maragung", L"About", MB_OK | MB_ICONINFORMATION);
+        else if (id == ID_BTN_PRINT) {
             ReadSettingsFromUI(); if (g_imgFront == nullptr) { MessageBoxA(hwnd, "Please select the Front image.", "Error", MB_OK); break; }
             PRINTDLGW pd = {sizeof(pd), hwnd, NULL, NULL, NULL, PD_RETURNDC}; if (!PrintDlgW(&pd)) break;
             DOCINFOW di = { sizeof(DOCINFOW), L"ID Card Print", NULL, NULL, 0 };
@@ -476,10 +535,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             DeleteDC(pd.hDC); break;
         }
-        if (LOWORD(wParam) == ID_BTN_PREV_PG1) { g_previewPage = 0; InvalidateRect(hPreviewArea, NULL, TRUE); }
-        if (LOWORD(wParam) == ID_BTN_PREV_PG2) { g_previewPage = 1; InvalidateRect(hPreviewArea, NULL, TRUE); }
-        if (HIWORD(wParam) == CBN_SELCHANGE || HIWORD(wParam) == EN_CHANGE || HIWORD(wParam) == BN_CLICKED) { SaveAppSettings(); InvalidateRect(hPreviewArea, NULL, TRUE); }
+        else if (id == ID_BTN_PREV_PG1) { g_previewPage = 0; InvalidateRect(hPreviewArea, NULL, TRUE); }
+        else if (id == ID_BTN_PREV_PG2) { g_previewPage = 1; InvalidateRect(hPreviewArea, NULL, TRUE); }
+        else if (code == CBN_SELCHANGE || code == EN_CHANGE) { SaveAppSettings(); InvalidateRect(hPreviewArea, NULL, TRUE); }
         break;
+    }
     case WM_DESTROY: SaveAppSettings(); for(int i=0;i<3;++i) { if(g_themes[i].hBrushBg) DeleteObject(g_themes[i].hBrushBg); if(g_themes[i].hBrushControl) DeleteObject(g_themes[i].hBrushControl); } PostQuitMessage(0); break;
     default: return DefWindowProc(hwnd, msg, wParam, lParam);
     }
