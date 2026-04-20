@@ -6,14 +6,13 @@ if ! pkg-config --exists gtk+-3.0; then
     exit 1
 fi
 
-mkdir -p build
-cd build
-
-echo "Compiling IDCardPrinter for Linux..."
-g++ -o IDCardPrinter ../src/main_linux.cpp $(pkg-config --cflags --libs gtk+-3.0) -O2 -Wall
+mkdir -p bin
+echo "Compiling ID Card Print for Linux..."
+g++ -o bin/IDCardPrint src/main_linux.cpp $(pkg-config --cflags --libs gtk+-3.0) -O2 -Wall -Isrc
 
 if [ $? -eq 0 ]; then
-    echo "Build successful! Run with ./IDCardPrinter"
+    echo "Build successful! Binary location: build/bin/IDCardPrint"
 else
     echo "Build failed."
+    exit 1
 fi
